@@ -1,0 +1,623 @@
+---
+title: "Volatility Correlation"
+author: "Ngan Tran"
+date: "12/26/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+# Introduction
+
+In this article, we will try to further investigate correlations between two instruments to find trading opportunities. In a previous article, we establish that we can predict the direction of an instrument ahead of time if we look at another instrument that's correlated with it. If two instruments are highly correlated and one instrument moves up, then the other instrument will likely follow.
+
+Likewise, the volatility of the highly correlated instruments should be correlated too. If one instrument becomes highly volatile, the other instrument should too. By volatility, we are referring to price difference between the high and low of the day. It's a measure of the trading range.
+
+Knowing the volatility ahead of time can give us clues about the direction of the market and also help us to determine stop and profit targets.
+
+In this article, we will take a look at the Treasury market. We'll look at the ZN(10-year Treasury Note), TN(Ultra-10 year Treasury Note), and ZB(30-year bond).
+
+```{r}
+library(ggplot2)
+library(data.table)
+library(lubridate)
+library(gridExtra)
+library(kableExtra)
+```
+
+
+# Data
+
+Let's take a look at the raw tick data. We have all the tick data in <code>ZN</code>, <code>TN</code>, and <code>ZB</code> data.table.
+
+```{r}
+ZN<-readRDS('rds/ZN-all.rds')
+TN<-readRDS('rds/TN-all.rds')
+ZB<-readRDS('rds/ZB-all.rds')
+
+str(ZN)
+```
+
+Our data includes the <code>OVN</code> session which is the overnight European session. In comparing volatility, we are only interested in the <code>RTH</code> session.
+
+```{r}
+#we trim to only the RTH session and make sure the data.table is in order
+ZN<-ZN[Session=='RTH'][order(DateTime)]
+ZB<-ZB[Session=='RTH'][order(DateTime)]
+TN<-TN[Session=='RTH'][order(DateTime)]
+```
+
+
+The Ultra 10 year Treasury note is the newest instrument so we will trim our dates to include only those dates since the introduction of the TN.
+```{r}
+TN.dates <- unique(TN$Date)
+
+ZN<-ZN[Date %in% TN.dates]
+ZB<-ZB[Date %in% TN.dates]
+
+```
+
+# Volatility
+
+Let's investigate the volatility of the various instruments. We'll create a function to compute the cumulative highs and lows for the day.
+
+```{r}
+ZN.ticksize<- 156.25
+ZB.ticksize<- 312.5
+
+addHighLowRange <- function(tick.dt, ticksize){
+  mydt<-copy(tick.dt)
+  
+  # RHigh/RLow refers to the High/Low of the RTH session
+  mydt<-mydt[,':='(RHigh=max(Last),
+                   RLow=min(Last)),by=Date]
+  
+  #Daily Range
+  mydt[,DRange:=(RHigh-RLow)/ticksize] 
+  
+  #daily volume
+  mydt[,TotalVolume :=sum(Volume),by=Date]
+  
+  #to look at intra-day volatility, we need to calculate the cumulative max and min of the day
+  mydt[,CHigh:=cummax(Last), by=Date]
+  mydt[,CLow:=cummin(Last),by=Date]
+  mydt[,CRange:=(CHigh-CLow)/ticksize]
+  
+  return(mydt)
+}
+```
+
+```{r}
+ZN<-addHighLowRange(ZN,ZN.ticksize)
+ZB<-addHighLowRange(ZB,ZB.ticksize)
+TN<-addHighLowRange(TN,ZN.ticksize)
+```
+
+```{r}
+#let's compute the Range for each day
+ZN.daily<-ZN[,.SD[1,list(DRange,TotalVolume)],by=Date]
+TN.daily<-TN[,.SD[1,list(DRange,TotalVolume)],by=Date]
+ZB.daily<-ZB[,.SD[1,list(DRange,TotalVolume)],by=Date]
+```
+
+
+Let's take a look at the volatility of the ZN first, since it's the most heavily traded interest instrument. 
+```{r}
+ggplot(ZN.daily, aes(x=DRange))+geom_histogram(binwidth=5)+xlab('Daily Range in Ticks')+scale_x_continuous(breaks=seq(0,100,10))+ggtitle('Distribution of ZN Daily Range')
+```
+
+```{r}
+summary(ZN.daily$DRange)
+```
+
+The mean for the daily range of the ZN is about 22 ticks with a standard deviation of 10.96 ticks.
+
+```{r}
+ggplot(ZB.daily, aes(x=DRange))+geom_histogram(binwidth=5)+xlab('Daily Range in Ticks')+scale_x_continuous(breaks=seq(0,100,10))+ggtitle('Distribution of ZB Daily Range')
+ggplot(TN.daily, aes(x=DRange))+geom_histogram(binwidth=5)+xlab('Daily Range in Ticks')+scale_x_continuous(breaks=seq(0,100,10))+ggtitle('Distribution of TN Daily Range')+xlim(0,100)
+```
+
+```{r}
+summary(ZB.daily$DRange)
+sd(ZB.daily$DRange)
+
+summary(TN.daily$DRange)
+sd(TN.daily$DRange)
+```
+
+The ZB has a mean of 28.3 ticks and standard deviation of 13.5.
+The TN has a mean of 30.7 ticks and standard deviation of 15.3.
+
+
+```{r}
+ggplot(ZN.daily, aes(x=Date,y=DRange))+geom_point()+ylab('Daily Range in Ticks') + ggtitle('ZN Daily Range over Time') + geom_smooth(method='lm')
+```
+
+It looks like the ZN range has decreased quite a bit from 2017 to 2019.
+
+```{r}
+ggplot(ZB.daily, aes(x=Date,y=DRange))+geom_point()+ylab('Daily Range in Ticks') + ggtitle('ZB Daily Range over Time') + geom_smooth(method='lm')
+ggplot(TN.daily, aes(x=Date,y=DRange))+geom_point()+ylab('Daily Range in Ticks') + ggtitle('TN Daily Range over Time') + geom_smooth(method='lm')
+
+```
+
+Both the ZB and TN experienced the same drop in volatility.
+
+
+```{r}
+combined.daily <- merge(ZN.daily,ZB.daily,by=c('Date'),suffixes = c('.ZN','.ZB'))
+combined.daily <- merge(combined.daily,TN.daily[,list(Date,DRange.TN=DRange)],by=c('Date'))
+```
+
+Let's take a look how the various volatilities are related. 
+```{r}
+
+m <- lm(combined.daily$DRange.TN ~ combined.daily$DRange.ZN)
+a <- signif(coef(m)[1], digits = 2)
+b <- signif(coef(m)[2], digits = 2)
+adj.r2 <- signif(summary(m)$adj.r.squared, 2)
+p.val <- signif(summary(m)$coef[2,4], 2)
+eq <- paste('y = ',b,'x + ',a,', adj R2=',adj.r2,', p-value=',p.val, sep="")
+ggplot(data=combined.daily,aes(x=DRange.TN,y=DRange.ZN))+geom_point()+geom_smooth(method='lm') + geom_text(aes(x = 40, y = 120, label = eq), color="black", size=5, parse = FALSE)+xlab('TN daily range')+ylab('ZN daily range')+ggtitle('Daily Range Comparison')
+
+
+m <- lm(combined.daily$DRange.ZB ~ combined.daily$DRange.ZN)
+a <- signif(coef(m)[1], digits = 2)
+b <- signif(coef(m)[2], digits = 2)
+adj.r2 <- signif(summary(m)$adj.r.squared, 2)
+p.val <- signif(summary(m)$coef[2,4], 2)
+eq <- paste('y = ',b,'x + ',a,', adj R2=',adj.r2,', p-value=',p.val, sep="")
+
+ggplot(data=combined.daily,aes(x=DRange.ZB,y=DRange.ZN))+geom_point()+geom_smooth(method='lm') + geom_text(aes(x = 40, y = 100, label = eq), color="black", size=5, parse = FALSE)+xlab('ZB daily range')+ylab('ZN daily range')+ggtitle('Daily Range Comparison')
+
+m <- lm(combined.daily$DRange.TN ~ combined.daily$DRange.ZB)
+a <- signif(coef(m)[1], digits = 2)
+b <- signif(coef(m)[2], digits = 2)
+adj.r2 <- signif(summary(m)$adj.r.squared, 2)
+p.val <- signif(summary(m)$coef[2,4], 2)
+eq <- paste('y = ',b,'x + ',a,', adj R2=',adj.r2,', p-value=',p.val, sep="")
+
+ggplot(data=combined.daily,aes(x=DRange.TN,y=DRange.ZB))+geom_point()+geom_smooth(method='lm') + geom_text(aes(x = 50, y = 120, label = eq), color="black", size=5, parse = FALSE)+xlab('TN daily range')+ylab('ZB daily range')+ggtitle('Daily Range Comparison')
+
+```
+
+Looks like they follow a very linear relationship. If one instrument is volatile, so are the others.
+
+Let's dig deeper into the ratios of the volatilities.
+
+```{r}
+ggplot(combined.daily,aes(x=DRange.TN/DRange.ZN))+geom_histogram(binwidth = 0.1)+xlab('TN-ZN Volatility Ratio')+ggtitle('End of day volatility ratio')
+print(summary(combined.daily[,DRange.TN/DRange.ZN]))
+print(paste('standard deviation: ',round(combined.daily[,sd(DRange.TN/DRange.ZN)],3),sep=''))
+
+ggplot(combined.daily,aes(x=DRange.ZB/DRange.ZN))+geom_histogram(binwidth = 0.1)+xlab('ZB-ZN Volatility Ratio')+ggtitle('End of day volatility ratio')
+print(summary(combined.daily[,DRange.ZB/DRange.ZN]))
+print(paste('standard deviation: ',round(combined.daily[,sd(DRange.ZB/DRange.ZN)],3),sep=''))
+
+ggplot(combined.daily,aes(x=DRange.TN/DRange.ZB))+geom_histogram(binwidth = 0.1)+xlab('TN-ZB Volatility Ratio')+ggtitle('End of day volatility ratio')
+print(summary(combined.daily[,DRange.TN/DRange.ZB]))
+print(paste('standard deviation: ',round(combined.daily[,sd(DRange.TN/DRange.ZB)],3),sep=''))
+```
+In the case of the TN-ZN volatility ratio, it follows a normal distribution almost exactly.
+
+```{r}
+#the TN has the fewest dates so we will use it to create our times data.table
+
+tn.dates<-unique(TN$Date)
+time_vec <- as.difftime(seq(5*3600+20*60,12*3600,by=10),units='secs')
+combined <- CJ(tn.dates,time_vec)
+colnames(combined)<-c('Date','secs')
+```
+
+```{r}
+combined <- TN[,list(Date,secs,TN.Price=Last,TN.CRange=CRange,TN.DRange=DRange)][combined, roll='nearest', on=list(Date,secs)]
+combined <- ZN[,list(Date,secs,ZN.Price=Last,ZN.CRange=CRange,ZN.DRange=DRange)][combined, roll='nearest', on=list(Date,secs)]
+combined <- ZB[,list(Date,secs,ZB.Price=Last,ZB.CRange=CRange,ZB.DRange=DRange)][combined, roll='nearest', on=list(Date,secs)]
+
+combined[,TNZN.CRange:=TN.CRange/ZN.CRange]
+combined[,ZBZN.CRange:=ZB.CRange/ZN.CRange]
+combined[,TNZB.CRange:=TN.CRange/ZB.CRange]
+
+combined[,TNZN.DRange:=TN.DRange/ZN.DRange]
+combined[,ZBZN.DRange:=ZB.DRange/ZN.DRange]
+combined[,TNZB.DRange:=TN.DRange/ZB.DRange]
+```
+
+
+```{r}
+#we start measuring the volatility ratios after 6am because we want the market to have a defined range. It's not as useful if the range is only 1 or 2 ticks. It makes the volatility calculations too volatile.
+combined <- combined[secs >= 6*3600]
+```
+
+
+Let's take a look at the intraday volatility ratios.
+```{r}
+ggplot(combined, aes(x=TNZN.CRange))+geom_histogram(binwidth = 0.1)+xlim(0.75,2.25)+xlab('TN-ZN Volatility Ratio')+ggtitle('Intraday volatility ratio')
+ggplot(combined, aes(x=ZBZN.CRange))+geom_histogram(binwidth = 0.1)+xlim(0.3,3)+xlab('ZB-ZN Volatility Ratio')+ggtitle('Intraday volatility ratio')
+ggplot(combined, aes(x=TNZB.CRange))+geom_histogram(binwidth = 0.1)+xlim(0.5,2)+xlab('TN-ZB Volatility Ratio')+ggtitle('Intraday volatility ratio')
+
+```
+
+```{r}
+print(summary(combined$TNZN.CRange))
+print(paste('standard deviation: ',round(sd(combined$TNZN.CRange),3),sep=''))
+```
+
+```{r}
+print(summary(combined$TNZB.CRange))
+print(paste('standard deviation: ',round(sd(combined$TNZB.CRange),3),sep=''))
+```
+
+```{r}
+print(summary(combined$ZBZN.CRange))
+print(paste('standard deviation: ',round(sd(combined$ZBZN.CRange),3),sep=''))
+```
+
+The intraday ZB/ZN volatility ratio has the greatest variation with a standard deviation of 0.296. 
+
+We know that the TN/ZN end of day volatility ratio is about 1.4, with SD=0.13. What is the distribution of the intraday volatility ratio for such average days? Let's find out.
+```{r}
+#we trim the combined data.table to TNZN.DRange between 1 standard deviation below and above the mean
+mean_DRange <- mean(combined$TNZN.DRange)
+sd_DRange <- sd(combined$TNZN.DRange)
+
+tmp.dt<-combined[TNZN.DRange < mean_DRange+sd_DRange][TNZN.DRange > mean_DRange-sd_DRange]
+ggplot(tmp.dt,aes(x=TNZN.CRange))+geom_histogram(binwidth = 0.1)+xlim(1,2)+xlab('TN-ZN Volatility Ratio')+ggtitle('Intraday volatility ratio')
+print(summary(tmp.dt$TNZN.CRange))
+print(paste('standard deviation: ',round(sd(tmp.dt$TNZN.CRange),3),sep=''))
+
+```
+
+Here, on average days where the final volatility ratio is between ~(1.3,1.5), we see that the intraday volatiltiy spends quite a bit of time beyond (1.3,1.5). The times where the market behaves abnormally is a good trading opportunity for us because we expect the behavior to revert to the mean.
+
+For example if the volatility ratio is below normal, say under 1.3, then we expect the TN to further increase its daily range beyond that of the ZN. If we expect the market to break out higher, then buying the TN instead of the ZN is a wise decision. While knowing just the volatility is not enough to make a trading decision, it can offer clues to the direction and momemtum of the market.
+
+Conversely, if the volatility ratio is very high, like above 1.8, then we can expect the ZN to close the gap a little bit and break out of its range beyond the TN. In this case, it might be wise to trade the ZN rather than the TN.
+
+Let's look at the ZB-ZN and TN-ZB relationships.
+```{r}
+#we trim the combined data.table to TNZN.DRange between 1 standard deviation above and below the mean
+mean_DRange <- mean(combined$ZBZN.DRange)
+sd_DRange <- sd(combined$ZBZN.DRange)
+
+tmp.dt<-combined[ZBZN.DRange < mean_DRange+sd_DRange][ZBZN.DRange > mean_DRange-sd_DRange]
+ggplot(tmp.dt,aes(x=ZBZN.CRange))+geom_histogram(binwidth = 0.1)+xlim(0.5,3)+xlab('ZB-ZN Volatility Ratio')+ggtitle('Intraday volatility ratio')
+print(summary(tmp.dt$ZBZN.CRange))
+print(paste('standard deviation: ',round(sd(tmp.dt$ZBZN.CRange),3),sep=''))
+
+mean_DRange <- mean(combined$TNZB.DRange)
+sd_DRange <- sd(combined$TNZB.DRange)
+
+tmp.dt<-combined[TNZB.DRange < mean_DRange+sd_DRange][TNZB.DRange > mean_DRange-sd_DRange]
+ggplot(tmp.dt,aes(x=TNZB.CRange))+geom_histogram(binwidth = 0.1)+xlim(0.5,2)+xlab('TN-ZB Volatility Ratio')+ggtitle('Intraday volatility ratio')
+print(summary(tmp.dt$TNZB.CRange))
+print(paste('standard deviation: ',round(sd(tmp.dt$TNZB.CRange),3),sep=''))
+
+
+```
+
+The ZB-ZN tends to swing to the left side of the volatility curve less when it is an average day. The volatility of the ZB seems to be higher than the ZN most of the time when it is an average day. When the volatility of the ZN is greater than the ZB, we might be able to draw a conclusion that the ZB might not be very volatile today. 
+
+Knowing that volatility will change is not enough. We also need to know the direction of the market. While this does not give us the direction, it does give us a clue to what the market is doing in terms of volatility.
+
+
+Let's explore further how we can take advantage of knowing volatility ahead of time.
+```{r}
+#we need to summarize the combined data table;
+#we will break the day into time periods
+#columns that start with B7 refer to the time period before 7am
+#B8 refers to the time period from 7am to 8am
+#B9 refers to the time period from 8am to 9am
+#B10 refers to the time period from 9am to 10am
+#B11 refers to the time period from 10am to 11am
+
+#A7 refers to the time period after 7am
+#A8 refers to the time period after 8am
+#A9 refers to the time period after 9am
+#A10 refers to the time period after 10am
+#A11 refers to the time period after 11am
+
+#lets get the highest range of each time period
+combined[,B7.TN.CRange:=.SD[secs < 7*3600,tail(TN.CRange,1)],by=Date]
+combined[,B8.TN.CRange:=.SD[secs < 8*3600,tail(TN.CRange,1)],by=Date]
+combined[,B9.TN.CRange:=.SD[secs < 9*3600,tail(TN.CRange,1)],by=Date]
+combined[,B10.TN.CRange:=.SD[secs < 10*3600,tail(TN.CRange,1)],by=Date]
+combined[,B11.TN.CRange:=.SD[secs < 11*3600,tail(TN.CRange,1)],by=Date]
+
+combined[,B7.ZN.CRange:=.SD[secs < 7*3600,tail(ZN.CRange,1)],by=Date]
+combined[,B8.ZN.CRange:=.SD[secs < 8*3600,tail(ZN.CRange,1)],by=Date]
+combined[,B9.ZN.CRange:=.SD[secs < 9*3600,tail(ZN.CRange,1)],by=Date]
+combined[,B10.ZN.CRange:=.SD[secs < 10*3600,tail(ZN.CRange,1)],by=Date]
+combined[,B11.ZN.CRange:=.SD[secs < 11*3600,tail(ZN.CRange,1)],by=Date]
+
+combined[,B7.ZB.CRange:=.SD[secs < 7*3600,tail(ZB.CRange,1)],by=Date]
+combined[,B8.ZB.CRange:=.SD[secs < 8*3600,tail(ZB.CRange,1)],by=Date]
+combined[,B9.ZB.CRange:=.SD[secs < 9*3600,tail(ZB.CRange,1)],by=Date]
+combined[,B10.ZB.CRange:=.SD[secs < 10*3600,tail(ZB.CRange,1)],by=Date]
+combined[,B11.ZB.CRange:=.SD[secs < 11*3600,tail(ZB.CRange,1)],by=Date]
+
+
+#we want to know the High, Low of the volatility ratios for each time period
+combined[,B7.TNZN.CRange.High:=max(.SD[secs < 7*3600,TNZN.CRange]),by=Date]
+combined[,B7.TNZN.CRange.Low:=min(.SD[secs < 7*3600,TNZN.CRange]),by=Date]
+
+combined[,A7.TNZN.CRange.High:=max(.SD[secs >= 7*3600,TNZN.CRange]),by=Date]
+combined[,A7.TNZN.CRange.Low:=min(.SD[secs >= 7*3600,TNZN.CRange]),by=Date]
+
+combined[,B8.TNZN.CRange.High:=max(.SD[secs >= 7*3600 & secs < 8*3600,TNZN.CRange]),by=Date]
+combined[,B8.TNZN.CRange.Low:=min(.SD[secs >= 7*3600 & secs < 8*3600,TNZN.CRange]),by=Date]
+
+
+combined[,A8.TNZN.CRange.High:=max(.SD[secs >= 8*3600,TNZN.CRange]),by=Date]
+combined[,A8.TNZN.CRange.Low:=min(.SD[secs >= 8*3600,TNZN.CRange]),by=Date]
+
+combined[,B9.TNZN.CRange.High:=max(.SD[secs >= 8*3600 & secs < 9*3600,TNZN.CRange]),by=Date]
+combined[,B9.TNZN.CRange.Low:=min(.SD[secs >= 8*3600 & secs < 9*3600,TNZN.CRange]),by=Date]
+
+
+combined[,A9.TNZN.CRange.High:=max(.SD[secs >= 9*3600,TNZN.CRange]),by=Date]
+combined[,A9.TNZN.CRange.Low:=min(.SD[secs >= 9*3600,TNZN.CRange]),by=Date]
+
+combined[,B10.TNZN.CRange.High:=max(.SD[secs >= 9*3600 & secs < 10*3600,TNZN.CRange]),by=Date]
+combined[,B10.TNZN.CRange.Low:=min(.SD[secs >= 9*3600 & secs < 10*3600,TNZN.CRange]),by=Date]
+
+
+combined[,A10.TNZN.CRange.High:=max(.SD[secs >= 10*3600,TNZN.CRange]),by=Date]
+combined[,A10.TNZN.CRange.Low:=min(.SD[secs >= 10*3600,TNZN.CRange]),by=Date]
+
+combined[,B11.TNZN.CRange.High:=max(.SD[secs >= 10*3600 & secs < 11*3600,TNZN.CRange]),by=Date]
+combined[,B11.TNZN.CRange.Low:=min(.SD[secs >= 10*3600 & secs < 11*3600,TNZN.CRange]),by=Date]
+
+combined[,A11.TNZN.CRange.High:=max(.SD[secs >= 11*3600,TNZN.CRange]),by=Date]
+combined[,A11.TNZN.CRange.Low:=min(.SD[secs >= 11*3600,TNZN.CRange]),by=Date]
+
+#ZBZN
+combined[,B7.ZBZN.CRange.High:=max(.SD[secs < 7*3600,ZBZN.CRange]),by=Date]
+combined[,B7.ZBZN.CRange.Low:=min(.SD[secs < 7*3600,ZBZN.CRange]),by=Date]
+
+combined[,A7.ZBZN.CRange.High:=max(.SD[secs >= 7*3600,ZBZN.CRange]),by=Date]
+combined[,A7.ZBZN.CRange.Low:=min(.SD[secs >= 7*3600,ZBZN.CRange]),by=Date]
+
+combined[,B8.ZBZN.CRange.High:=max(.SD[secs >= 7*3600 & secs < 8*3600,ZBZN.CRange]),by=Date]
+combined[,B8.ZBZN.CRange.Low:=min(.SD[secs >= 7*3600 & secs < 8*3600,ZBZN.CRange]),by=Date]
+
+
+combined[,A8.ZBZN.CRange.High:=max(.SD[secs >= 8*3600,ZBZN.CRange]),by=Date]
+combined[,A8.ZBZN.CRange.Low:=min(.SD[secs >= 8*3600,ZBZN.CRange]),by=Date]
+
+combined[,B9.ZBZN.CRange.High:=max(.SD[secs >= 8*3600 & secs < 9*3600,ZBZN.CRange]),by=Date]
+combined[,B9.ZBZN.CRange.Low:=min(.SD[secs >= 8*3600 & secs < 9*3600,ZBZN.CRange]),by=Date]
+
+
+combined[,A9.ZBZN.CRange.High:=max(.SD[secs >= 9*3600,ZBZN.CRange]),by=Date]
+combined[,A9.ZBZN.CRange.Low:=min(.SD[secs >= 9*3600,ZBZN.CRange]),by=Date]
+
+combined[,B10.ZBZN.CRange.High:=max(.SD[secs >= 9*3600 & secs < 10*3600,ZBZN.CRange]),by=Date]
+combined[,B10.ZBZN.CRange.Low:=min(.SD[secs >= 9*3600 & secs < 10*3600,ZBZN.CRange]),by=Date]
+
+
+combined[,A10.ZBZN.CRange.High:=max(.SD[secs >= 10*3600,ZBZN.CRange]),by=Date]
+combined[,A10.ZBZN.CRange.Low:=min(.SD[secs >= 10*3600,ZBZN.CRange]),by=Date]
+
+combined[,B11.ZBZN.CRange.High:=max(.SD[secs >= 10*3600 & secs < 11*3600,ZBZN.CRange]),by=Date]
+combined[,B11.ZBZN.CRange.Low:=min(.SD[secs >= 10*3600 & secs < 11*3600,ZBZN.CRange]),by=Date]
+
+combined[,A11.ZBZN.CRange.High:=max(.SD[secs >= 11*3600,ZBZN.CRange]),by=Date]
+combined[,A11.ZBZN.CRange.Low:=min(.SD[secs >= 11*3600,ZBZN.CRange]),by=Date]
+
+#TNZB
+combined[,B7.TNZB.CRange.High:=max(.SD[secs < 7*3600,TNZB.CRange]),by=Date]
+combined[,B7.TNZB.CRange.Low:=min(.SD[secs < 7*3600,TNZB.CRange]),by=Date]
+
+combined[,A7.TNZB.CRange.High:=max(.SD[secs >= 7*3600,TNZB.CRange]),by=Date]
+combined[,A7.TNZB.CRange.Low:=min(.SD[secs >= 7*3600,TNZB.CRange]),by=Date]
+
+combined[,B8.TNZB.CRange.High:=max(.SD[secs >= 7*3600 & secs < 8*3600,TNZB.CRange]),by=Date]
+combined[,B8.TNZB.CRange.Low:=min(.SD[secs >= 7*3600 & secs < 8*3600,TNZB.CRange]),by=Date]
+
+combined[,A8.TNZB.CRange.High:=max(.SD[secs >= 8*3600,TNZB.CRange]),by=Date]
+combined[,A8.TNZB.CRange.Low:=min(.SD[secs >= 8*3600,TNZB.CRange]),by=Date]
+
+combined[,B9.TNZB.CRange.High:=max(.SD[secs >= 8*3600 & secs < 9*3600,TNZB.CRange]),by=Date]
+combined[,B9.TNZB.CRange.Low:=min(.SD[secs >= 8*3600 & secs < 9*3600,TNZB.CRange]),by=Date]
+
+combined[,A9.TNZB.CRange.High:=max(.SD[secs >= 9*3600,TNZB.CRange]),by=Date]
+combined[,A9.TNZB.CRange.Low:=min(.SD[secs >= 9*3600,TNZB.CRange]),by=Date]
+
+combined[,B10.TNZB.CRange.High:=max(.SD[secs >= 9*3600 & secs < 10*3600,TNZB.CRange]),by=Date]
+combined[,B10.TNZB.CRange.Low:=min(.SD[secs >= 9*3600 & secs < 10*3600,TNZB.CRange]),by=Date]
+
+combined[,A10.TNZB.CRange.High:=max(.SD[secs >= 10*3600,TNZB.CRange]),by=Date]
+combined[,A10.TNZB.CRange.Low:=min(.SD[secs >= 10*3600,TNZB.CRange]),by=Date]
+
+combined[,B11.TNZB.CRange.High:=max(.SD[secs >= 10*3600 & secs < 11*3600,TNZB.CRange]),by=Date]
+combined[,B11.TNZB.CRange.Low:=min(.SD[secs >= 10*3600 & secs < 11*3600,TNZB.CRange]),by=Date]
+
+combined[,A11.TNZB.CRange.High:=max(.SD[secs >= 11*3600,TNZB.CRange]),by=Date]
+combined[,A11.TNZB.CRange.Low:=min(.SD[secs >= 11*3600,TNZB.CRange]),by=Date]
+
+daily.combined <- combined[,.SD[1],by=Date]
+
+```
+
+
+Let's define a function that takes a boolean vector and returns the percentage of TRUE values. We'll use this function to define probability of a logical vector.
+```{r}
+# the indices argument is included so the boot function can use it
+prob<-function(data, indices=NULL){
+  if(is.null(indices)) {
+    return(sum(data)/length(data))
+  }
+  return(sum(data[indices])/length(data[indices]))
+}
+```
+
+
+Now, we'll ask a few questions of the data. We want to know what happens to the volatility ratio if it dips below 2 standard deviations below the mean volatility ratio.
+```{r}
+mean.TNZN.DRange <- mean(combined$TNZN.DRange)
+sd.TNZN.DRange <- sd(combined$TNZN.DRange)
+
+mean.TNZN.DRange-2*sd.TNZN.DRange
+```
+
+```{r}
+daily.combined[B7.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,summary(A7.TNZN.CRange.High)]
+```
+
+OK, so we see that if the volatility ratio for TN-ZN relationship dips below 1.13 before 7 AM, the rest of the day, it returns to an average of 1.44. Now, let's calculate the probability that it stays above 2 SD below the mean.
+
+```{r}
+daily.combined[B7.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,prob(A7.TNZN.CRange.High > 1.14)]
+```
+So 99% probability that the volatility ratio doesn't stay 2 standard deviations below the mean. How about 1 standard deviation below the mean?
+
+```{r}
+daily.combined[B7.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,prob(A7.TNZN.CRange.High > mean.TNZN.DRange - sd.TNZN.DRange)]
+```
+ 
+Still very good at 90%. This says that if the volatility ratio dips below 2 standard deviations of the mean, there's a 90% chance it goes up to within 1 standard deviation of the mean.
+
+How often does the volatility ratio dip below 2 standard deviations of the mean?
+```{r}
+n<-daily.combined[B7.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,length(unique(Date))]
+total<-length(unique(daily.combined$Date))
+print(n)
+print(total)
+print(n/total)
+```
+
+Roughly 21.5% of trading days the TN-ZN dips below 1.139 volatility ratio. A relatively rare event though a great opportunity. What this means is that we know the TN will increase it's volatility relatively to the ZN. We know with relative certainty that it will make new highs or lows. We just don't know if it's a high or low. We still need to know other things to guess the direction, but knowing that the TN will increase volatility means that we should be watching it more closely for trading opportunities.
+
+How about other times during the day? Does it exhibit the same behavior?
+
+```{r}
+daily.combined[B8.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,summary(A8.TNZN.CRange.High)]
+```
+```{r}
+daily.combined[B8.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,prob(A8.TNZN.CRange.High > 1.14)]
+```
+
+So we go from 99.3% if it's before 7 AM to 95.2% if it's before 8 AM.
+
+What happens after 9 AM?
+```{r}
+daily.combined[B9.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,prob(A9.TNZN.CRange.High > 1.14)]
+```
+
+Let's go further to look at before 10 AM.
+```{r}
+daily.combined[B10.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,prob(A10.TNZN.CRange.High > 1.14)]
+```
+
+Finally, how about 11 AM?
+```{r}
+daily.combined[B11.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,prob(A11.TNZN.CRange.High > 1.14)]
+```
+After 11 AM, the probability goes down quite a bit at only 71.4%.
+
+Basically, if the volatility dips below 1.14 before 9 AM, we can be fairly confident the TN will make another high or low. However, after that, the probability goes down quite a bit to 85% before 10 AM and 71% before 11 AM.
+
+Let's take a look at the other relationships to see if they exhibit the same behaviors. We'll construct a chart to view the data.
+```{r}
+mean.TNZN.DRange <- mean(combined$TNZN.DRange)
+sd.TNZN.DRange <- sd(combined$TNZN.DRange)
+
+mean.ZBZN.DRange <- mean(combined$ZBZN.DRange)
+sd.ZBZN.DRange <- sd(combined$ZBZN.DRange)
+
+mean.TNZB.DRange <- mean(combined$TNZB.DRange)
+sd.TNZB.DRange <- sd(combined$TNZB.DRange)
+
+times <- c(7,8,9,10,11)
+
+TNZN.probs <- list()
+ZBZN.probs <- list()
+TNZB.probs <- list()
+
+TNZN.probs[[1]] <- daily.combined[B7.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,(A7.TNZN.CRange.High > mean.TNZN.DRange-2*sd.TNZN.DRange)]
+TNZN.probs[[2]] <- daily.combined[B8.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,(A8.TNZN.CRange.High > mean.TNZN.DRange-2*sd.TNZN.DRange)]
+TNZN.probs[[3]] <- daily.combined[B9.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,(A9.TNZN.CRange.High > mean.TNZN.DRange-2*sd.TNZN.DRange)]
+TNZN.probs[[4]] <- daily.combined[B10.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,(A10.TNZN.CRange.High > mean.TNZN.DRange-2*sd.TNZN.DRange)]
+TNZN.probs[[5]] <- daily.combined[B11.TNZN.CRange.Low < mean.TNZN.DRange-2*sd.TNZN.DRange,(A11.TNZN.CRange.High > mean.TNZN.DRange-2*sd.TNZN.DRange)]
+
+ZBZN.probs[[1]] <- daily.combined[B7.ZBZN.CRange.Low < mean.ZBZN.DRange-2*sd.ZBZN.DRange,(A7.ZBZN.CRange.High > mean.ZBZN.DRange-2*sd.ZBZN.DRange)]
+ZBZN.probs[[2]] <- daily.combined[B8.ZBZN.CRange.Low < mean.ZBZN.DRange-2*sd.ZBZN.DRange,(A8.ZBZN.CRange.High > mean.ZBZN.DRange-2*sd.ZBZN.DRange)]
+ZBZN.probs[[3]] <- daily.combined[B9.ZBZN.CRange.Low < mean.ZBZN.DRange-2*sd.ZBZN.DRange,(A9.ZBZN.CRange.High > mean.ZBZN.DRange-2*sd.ZBZN.DRange)]
+ZBZN.probs[[4]] <- daily.combined[B10.ZBZN.CRange.Low < mean.ZBZN.DRange-2*sd.ZBZN.DRange,(A10.ZBZN.CRange.High > mean.ZBZN.DRange-2*sd.ZBZN.DRange)]
+ZBZN.probs[[5]] <- daily.combined[B11.ZBZN.CRange.Low < mean.ZBZN.DRange-2*sd.ZBZN.DRange,(A11.ZBZN.CRange.High > mean.ZBZN.DRange-2*sd.ZBZN.DRange)]
+
+TNZB.probs[[1]] <- daily.combined[B7.TNZB.CRange.Low < mean.TNZB.DRange-2*sd.TNZB.DRange,(A7.TNZB.CRange.High > mean.TNZB.DRange-2*sd.TNZB.DRange)]
+TNZB.probs[[2]] <- daily.combined[B8.TNZB.CRange.Low < mean.TNZB.DRange-2*sd.TNZB.DRange,(A8.TNZB.CRange.High > mean.TNZB.DRange-2*sd.TNZB.DRange)]
+TNZB.probs[[3]] <- daily.combined[B9.TNZB.CRange.Low < mean.TNZB.DRange-2*sd.TNZB.DRange,(A9.TNZB.CRange.High > mean.TNZB.DRange-2*sd.TNZB.DRange)]
+TNZB.probs[[4]] <- daily.combined[B10.TNZB.CRange.Low < mean.TNZB.DRange-2*sd.TNZB.DRange,(A10.TNZB.CRange.High > mean.TNZB.DRange-2*sd.TNZB.DRange)]
+TNZB.probs[[5]] <- daily.combined[B11.TNZB.CRange.Low < mean.TNZB.DRange-2*sd.TNZB.DRange,(A11.TNZB.CRange.High > mean.TNZB.DRange-2*sd.TNZB.DRange)]
+
+# takes a vector(data), statistic function(func), number of repetitions(n) and returns a vector of the mean, 2.5% and 97.5% confidence interval
+boot.mean.ci <- function(data, func, n=10000){
+  mylist <- NULL
+  for(i in 1:n){
+    mysample <- sample(x=data,size=length(data),replace=TRUE)
+    mylist <- c(mylist,func(mysample))
+  }
+  m <- mean(mylist)
+  ci <- quantile(mylist,probs=c(0.025,0.975))
+  values <- c(m,ci[1],ci[2])
+  names(values)<-c('mean','2.5%','97.5%')
+  return(values)
+}
+
+set.seed(11)
+
+TNZN.mean.ci.dt<-data.table(Time=times,Mean=rep(as.double(NA),5),lower.ci=rep(as.double(NA),5),upper.ci=rep(as.double(NA),5))
+ZBZN.mean.ci.dt<-copy(TNZN.mean.ci.dt)
+TNZB.mean.ci.dt<-copy(TNZN.mean.ci.dt)
+
+for(i in 1:5){
+  pb <- boot.mean.ci(TNZN.probs[[i]],prob)
+  TNZN.mean.ci.dt$Mean[i]<-pb['mean']
+  TNZN.mean.ci.dt$lower.ci[i]<-pb['2.5%']
+  TNZN.mean.ci.dt$upper.ci[i]<-pb['97.5%']
+  
+  pb<-boot.mean.ci(ZBZN.probs[[i]],prob)
+  ZBZN.mean.ci.dt$Mean[i]<-pb['mean']
+  ZBZN.mean.ci.dt$lower.ci[i]<-pb['2.5%']
+  ZBZN.mean.ci.dt$upper.ci[i]<-pb['97.5%']
+  
+  pb<-boot.mean.ci(TNZB.probs[[i]],prob)
+  TNZB.mean.ci.dt$Mean[i]<-pb['mean']
+  TNZB.mean.ci.dt$lower.ci[i]<-pb['2.5%']
+  TNZB.mean.ci.dt$upper.ci[i]<-pb['97.5%']
+}
+
+TNZN.mean.ci.dt$Relationship<-'TN-ZN'
+ZBZN.mean.ci.dt$Relationship<-'ZB-ZN'
+TNZB.mean.ci.dt$Relationship<-'TN-ZB'
+
+dt.list <- list(TNZN.mean.ci.dt,ZBZN.mean.ci.dt,TNZB.mean.ci.dt)
+
+all3.dt<-rbindlist(dt.list,use.names=TRUE,fill=TRUE)
+```
+
+Let's plot the all3.dt data frame
+
+```{r}
+ggplot(all3.dt, aes(x=Time,y=Mean,color=Relationship,shape=Relationship)) + geom_point(size=5) + geom_line() + ggtitle('Probability that volatility increases') + xlab('Time (AM)')+ylab('mean probability')
+```
+
+```{r}
+k<-kable(all3.dt,format='html',digits=3)
+kable_styling(k,bootstrap_options = 'striped',full_width = F, position='left')
+```
+
+We see a general trend across all three relationships where early in the day, like 7 AM and 8 AM, there is a strong tendency for the market to revert to the mean. Later in the day, however, the trend becomes stronger and thus, it does not have as strong a tendency to revert to the mean.
+
+# Conclusion
+
+Volatility among the 3 treasury instruments, the ZN, ZB, and TN are highly correlated. When one instrument makes new highs or lows, the others do the same. This relationship is fairly consistent over time.
+
+We can take advantage of this consistency when we notice that there is an anomaly in the volatility ratio, especially on the low end. When the volatility ratios are low, there is a strong tendency to revert to the mean. This gives us an indication that the more volatile instrument is going to be making more highs or lows. Especially, when the lows happen early in the morning before 8 AM, we know with over 90% probability that the volatility ratio will rise.
+
+Unfortunately, knowing volatility ahead of time does not give us any indication about direction. We need to know direction to make a trade. However, the volatility does give us some clues, such as choosing which instrument to trade. Also it makes us more vigilant to watch for trading opportunities when low volatility ratios happen. 
